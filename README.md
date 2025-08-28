@@ -1,3 +1,20 @@
+> [!important]
+> ## Differences from the Original Repository
+> This repository is forked from [FunAudioLLM/CosyVoice](https://github.com/FunAudioLLM/CosyVoice)
+> 
+> The main changes include:
+> - Refactored the WebUI page logic based on the new interfaces provided by CosyVoice 2
+> - Upgraded to the latest version of Gradio 
+> - Added basic voice timbre management functionality
+>   - Voice timbres are saved in the project root directory by default
+> - Made minimal changes and optimizations to the cosyvoice package code
+>
+> WebUI screenshot:  
+> <img src="./asset/webui-1.jpg" width="250px">
+> <img src="./asset/webui-2.jpg" width="250px">
+> <img src="./asset/webui-3.jpg" width="250px">
+
+
 [![SVG Banners](https://svg-banners.vercel.app/api?type=origin&text1=CosyVoice🤠&text2=Text-to-Speech%20💖%20Large%20Language%20Model&width=800&height=210)](https://github.com/Akshay090/svg-banners)
 
 ## 👉🏻 CosyVoice 👈🏻

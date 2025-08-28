@@ -1,200 +1,263 @@
-# Copyright (c) 2024 Alibaba Inc (authors: Xiang Lyu, Liu Yue)
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#   http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-import os
-import sys
+import os, sys
+
 import argparse
 import gradio as gr
-import numpy as np
-import torch
-import torchaudio
 import random
-import librosa
+
+import numpy as np, torch, torchaudio, librosa
+
+from datetime import datetime
+
+
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append('{}/third_party/Matcha-TTS'.format(ROOT_DIR))
-from cosyvoice.cli.cosyvoice import CosyVoice, CosyVoice2
+sys.path.append(f'{ROOT_DIR}/third_party/Matcha-TTS')
+
+from cosyvoice.cli.cosyvoice import CosyVoice2
 from cosyvoice.utils.file_utils import load_wav, logging
 from cosyvoice.utils.common import set_all_random_seed
 
-inference_mode_list = ['预训练音色', '3s极速复刻', '跨语种复刻', '自然语言控制']
-instruct_dict = {'预训练音色': '1. 选择预训练音色\n2. 点击生成音频按钮',
-                 '3s极速复刻': '1. 选择prompt音频文件，或录入prompt音频，注意不超过30s，若同时提供，优先选择prompt音频文件\n2. 输入prompt文本\n3. 点击生成音频按钮',
-                 '跨语种复刻': '1. 选择prompt音频文件，或录入prompt音频，注意不超过30s，若同时提供，优先选择prompt音频文件\n2. 点击生成音频按钮',
-                 '自然语言控制': '1. 选择预训练音色\n2. 输入instruct文本\n3. 点击生成音频按钮'}
-stream_mode_list = [('否', False), ('是', True)]
-max_val = 0.8
 
 
-def generate_seed():
-    seed = random.randint(1, 100000000)
-    return {
-        "__type__": "update",
-        "value": seed
-    }
+cosyvoice = None
+datasEmpty = None
+
+speakers_key = {}
+speakers = []
 
 
+valMax = 0.8
 def postprocess(speech, top_db=60, hop_length=220, win_length=440):
-    speech, _ = librosa.effects.trim(
-        speech, top_db=top_db,
-        frame_length=win_length,
-        hop_length=hop_length
-    )
-    if speech.abs().max() > max_val:
-        speech = speech / speech.abs().max() * max_val
-    speech = torch.concat([speech, torch.zeros(1, int(cosyvoice.sample_rate * 0.2))], dim=1)
-    return speech
+	speech, _ = librosa.effects.trim(
+		speech, top_db=top_db,
+		frame_length=win_length,
+		hop_length=hop_length
+	)
+	if speech.abs().max() > valMax:
+		speech = speech / speech.abs().max() * valMax
+	speech = torch.concat([speech, torch.zeros(1, int(cosyvoice.sample_rate * 0.2))], dim=1)
+	return speech
 
 
-def change_instruction(mode_checkbox_group):
-    return instruct_dict[mode_checkbox_group]
+
+rateSamplePrompt = 16000
+def createAudio(
+	modeInference,
+	textCreate, textInstruct, audioSourceCoverTimbre,
+	idSpeaker,
+	textPrompt, audioPromptUpload, audioPromptRecord,
+	speed, stream, seed
+):
+	global speakers, speakers_key
+
+	# if textInstruct == '':
+	# 	yield (cosyvoice.sample_rate, datasEmpty)
+	# 	return gr.Warning('您正在使用指令模式, 请输入指令文本')
 
 
-def generate_audio(tts_text, mode_checkbox_group, sft_dropdown, prompt_text, prompt_wav_upload, prompt_wav_record, instruct_text,
-                   seed, stream, speed):
-    if prompt_wav_upload is not None:
-        prompt_wav = prompt_wav_upload
-    elif prompt_wav_record is not None:
-        prompt_wav = prompt_wav_record
-    else:
-        prompt_wav = None
-    # if instruct mode, please make sure that model is iic/CosyVoice-300M-Instruct and not cross_lingual mode
-    if mode_checkbox_group in ['自然语言控制']:
-        if cosyvoice.instruct is False:
-            gr.Warning('您正在使用自然语言控制模式, {}模型不支持此模式, 请使用iic/CosyVoice-300M-Instruct模型'.format(args.model_dir))
-            yield (cosyvoice.sample_rate, default_data)
-        if instruct_text == '':
-            gr.Warning('您正在使用自然语言控制模式, 请输入instruct文本')
-            yield (cosyvoice.sample_rate, default_data)
-        if prompt_wav is not None or prompt_text != '':
-            gr.Info('您正在使用自然语言控制模式, prompt音频/prompt文本会被忽略')
-    # if cross_lingual mode, please make sure that model is iic/CosyVoice-300M and tts_text prompt_text are different language
-    if mode_checkbox_group in ['跨语种复刻']:
-        if cosyvoice.instruct is True:
-            gr.Warning('您正在使用跨语种复刻模式, {}模型不支持此模式, 请使用iic/CosyVoice-300M模型'.format(args.model_dir))
-            yield (cosyvoice.sample_rate, default_data)
-        if instruct_text != '':
-            gr.Info('您正在使用跨语种复刻模式, instruct文本会被忽略')
-        if prompt_wav is None:
-            gr.Warning('您正在使用跨语种复刻模式, 请提供prompt音频')
-            yield (cosyvoice.sample_rate, default_data)
-        gr.Info('您正在使用跨语种复刻模式, 请确保合成文本和prompt文本为不同语言')
-    # if in zero_shot cross_lingual, please make sure that prompt_text and prompt_wav meets requirements
-    if mode_checkbox_group in ['3s极速复刻', '跨语种复刻']:
-        if prompt_wav is None:
-            gr.Warning('prompt音频为空，您是否忘记输入prompt音频？')
-            yield (cosyvoice.sample_rate, default_data)
-        if torchaudio.info(prompt_wav).sample_rate < prompt_sr:
-            gr.Warning('prompt音频采样率{}低于{}'.format(torchaudio.info(prompt_wav).sample_rate, prompt_sr))
-            yield (cosyvoice.sample_rate, default_data)
-    # sft mode only use sft_dropdown
-    if mode_checkbox_group in ['预训练音色']:
-        if instruct_text != '' or prompt_wav is not None or prompt_text != '':
-            gr.Info('您正在使用预训练音色模式，prompt文本/prompt音频/instruct文本会被忽略！')
-        if sft_dropdown == '':
-            gr.Warning('没有可用的预训练音色！')
-            yield (cosyvoice.sample_rate, default_data)
-    # zero_shot mode only use prompt_wav prompt text
-    if mode_checkbox_group in ['3s极速复刻']:
-        if prompt_text == '':
-            gr.Warning('prompt文本为空，您是否忘记输入prompt文本？')
-            yield (cosyvoice.sample_rate, default_data)
-        if instruct_text != '':
-            gr.Info('您正在使用3s极速复刻模式，预训练音色/instruct文本会被忽略！')
+	set_all_random_seed(seed)
+	idSpeakerTemp = f'temp-{idSpeaker}'
+	cosyvoice.frontend.spk2info[idSpeakerTemp] = dict(speakers_key[idSpeaker])
 
-    if mode_checkbox_group == '预训练音色':
-        logging.info('get sft inference request')
-        set_all_random_seed(seed)
-        for i in cosyvoice.inference_sft(tts_text, sft_dropdown, stream=stream, speed=speed):
-            yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
-    elif mode_checkbox_group == '3s极速复刻':
-        logging.info('get zero_shot inference request')
-        prompt_speech_16k = postprocess(load_wav(prompt_wav, prompt_sr))
-        set_all_random_seed(seed)
-        for i in cosyvoice.inference_zero_shot(tts_text, prompt_text, prompt_speech_16k, stream=stream, speed=speed):
-            yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
-    elif mode_checkbox_group == '跨语种复刻':
-        logging.info('get cross_lingual inference request')
-        prompt_speech_16k = postprocess(load_wav(prompt_wav, prompt_sr))
-        set_all_random_seed(seed)
-        for i in cosyvoice.inference_cross_lingual(tts_text, prompt_speech_16k, stream=stream, speed=speed):
-            yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
-    else:
-        logging.info('get instruct inference request')
-        set_all_random_seed(seed)
-        for i in cosyvoice.inference_instruct(tts_text, sft_dropdown, instruct_text, stream=stream, speed=speed):
-            yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
+	textNow = datetime.now().strftime('%m%d-%H%M%S')
+
+	if modeInference == '普通':
+		logging.info(f'[普通合成]开始：音色[{idSpeaker}]，文本[{textCreate}]')
+		for data in cosyvoice.inference_zero_shot(textCreate, '', '', idSpeakerTemp, stream, speed):
+			logging.info(f'[普通合成]结束：音色[{idSpeaker}]，文本[{textCreate}]')
+
+			yield (cosyvoice.sample_rate, data['tts_speech'].numpy().flatten())
+
+	if modeInference == '指令':
+		logging.info(f'[指令合成]开始：音色[{idSpeaker}]，指令[{textInstruct}]，文本[{textCreate}]')
+
+		for data in cosyvoice.inference_instruct2(textCreate, textInstruct, '', idSpeakerTemp, stream, speed):
+			logging.info(f'[指令合成]结束：音色[{idSpeaker}]，指令[{textInstruct}]，文本[{textCreate}]')
+
+			yield (cosyvoice.sample_rate, data['tts_speech'].numpy().flatten())
+
+	if modeInference == '跨语种':
+		logging.info(f'[跨语种合成]开始：音色[{idSpeaker}]，文本[{textCreate}]')
+
+		for data in cosyvoice.inference_cross_lingual(textCreate, '', idSpeakerTemp, stream, speed):
+			logging.info(f'[跨语种合成]结束：音色[{idSpeaker}]，文本[{textCreate}]')
+
+			yield (cosyvoice.sample_rate, data['tts_speech'].numpy().flatten())
+
+
+
+def insertSpeaker(idSpeakerInsert, textPrompt, audioPromptUpload, audioPromptRecord):
+	global speakers, speakers_key
+
+	idSpeakerInsert = str.strip(idSpeakerInsert)
+	if idSpeakerInsert is None or idSpeakerInsert == '':
+		gr.Error('请输入音色ID')
+		return
+
+	if idSpeakerInsert in speakers_key:
+		return gr.Warning('音色ID已存在')
+
+
+	if audioPromptUpload is not None:
+		audioPrompt = audioPromptUpload
+	elif audioPromptRecord is not None:
+		audioPrompt = audioPromptRecord
+	else:
+		return gr.Warning('请先上传或录制音频')
+
+
+	audioSpeech = postprocess(load_wav(audioPrompt, rateSamplePrompt))
+
+
+	speaker = cosyvoice.frontend.frontend_zero_shot('', textPrompt, audioSpeech, cosyvoice.sample_rate, '')
+	del speaker['text']
+	del speaker['text_len']
+
+	speakers_key[idSpeakerInsert] = speaker
+
+	torch.save(speakers_key, args.fileSpeakers)
+
+	speakers = list(speakers_key.keys())
+
+	logging.info(f'{idSpeakerInsert}音色已复刻')
+
+	return [gr.update( value=None, choices=speakers), gr.update( value=None, choices=speakers), gr.update(interactive=True)]
+
+def updateSpeaker(idsSpeakersOld, idSpeakerNew):
+	global speakers, speakers_key
+
+	if(len(idsSpeakersOld) == 0):
+		return gr.Warning('请选择要修改ID的音色')
+	if(len(idsSpeakersOld) > 1):
+		return gr.Warning('不能同时修改多个音色的ID')
+
+	speaker = speakers_key[idsSpeakersOld[0]]
+	del speakers_key[idsSpeakersOld[0]]
+	speakers_key[idSpeakerNew] = speaker
+
+	speakers = list(speakers_key.keys())
+
+	return [gr.update( value=None, choices=speakers), gr.update( value=None, choices=speakers), gr.update(value='')]
+
+def deleteSpeakers(idsSpeakers):
+	global speakers, speakers_key
+
+	for idSpeaker in idsSpeakers:
+		del speakers_key[idSpeaker]
+
+	torch.save(speakers_key, args.fileSpeakers)
+
+	speakers = list(speakers_key.keys())
+
+	return [gr.update( value=None, choices=speakers), gr.update( value=None, choices=speakers)]
+
 
 
 def main():
-    with gr.Blocks() as demo:
-        gr.Markdown("### 代码库 [CosyVoice](https://github.com/FunAudioLLM/CosyVoice) \
-                    预训练模型 [CosyVoice-300M](https://www.modelscope.cn/models/iic/CosyVoice-300M) \
-                    [CosyVoice-300M-Instruct](https://www.modelscope.cn/models/iic/CosyVoice-300M-Instruct) \
-                    [CosyVoice-300M-SFT](https://www.modelscope.cn/models/iic/CosyVoice-300M-SFT)")
-        gr.Markdown("#### 请输入需要合成的文本，选择推理模式，并按照提示步骤进行操作")
+	global speakers, speakers_key
 
-        tts_text = gr.Textbox(label="输入合成文本", lines=1, value="我是通义实验室语音团队全新推出的生成式语音大模型，提供舒适自然的语音合成能力。")
-        with gr.Row():
-            mode_checkbox_group = gr.Radio(choices=inference_mode_list, label='选择推理模式', value=inference_mode_list[0])
-            instruction_text = gr.Text(label="操作步骤", value=instruct_dict[inference_mode_list[0]], scale=0.5)
-            sft_dropdown = gr.Dropdown(choices=sft_spk, label='选择预训练音色', value=sft_spk[0], scale=0.25)
-            stream = gr.Radio(choices=stream_mode_list, label='是否流式推理', value=stream_mode_list[0][1])
-            speed = gr.Number(value=1, label="速度调节(仅支持非流式推理)", minimum=0.5, maximum=2.0, step=0.1)
-            with gr.Column(scale=0.25):
-                seed_button = gr.Button(value="\U0001F3B2")
-                seed = gr.Number(value=0, label="随机推理种子")
+	with gr.Blocks() as demo:
+		gr.Markdown('# CosyVoice 2')
+		gr.Markdown('官方代码库 [CosyVoice](https://github.com/FunAudioLLM/CosyVoice) \
+					官方预训练模型 [CosyVoice2-0.5B](https://www.modelscope.cn/models/iic/CosyVoice2-0.5B) \
+			  		UI重构代码库 [by DanoR](https://github.com/zheung/cosy-voice)')
 
-        with gr.Row():
-            prompt_wav_upload = gr.Audio(sources='upload', type='filepath', label='选择prompt音频文件，注意采样率不低于16khz')
-            prompt_wav_record = gr.Audio(sources='microphone', type='filepath', label='录制prompt音频文件')
-        prompt_text = gr.Textbox(label="输入prompt文本", lines=1, placeholder="请输入prompt文本，需与prompt音频内容一致，暂时不支持自动识别...", value='')
-        instruct_text = gr.Textbox(label="输入instruct文本", lines=1, placeholder="请输入instruct文本.", value='')
+		with gr.Tab('生成音频'):
+			with gr.Row(equal_height=True):
+				with gr.Column(scale=9):
+					radioIDSpeaker = gr.Radio(label='现有音色', choices=speakers, value=speakers[0] if len(speakers) > 0 else None)
+					radioModeInference = gr.Radio(label='推理功能', choices=['普通', '指令', '跨语种', '音色覆盖'], value='普通')
+					with gr.Row(equal_height=True):
+						audioSourceCoverTimbre = gr.Audio(label='源音频（被覆盖音色的音频）', sources='upload', type='filepath', visible=False)
+						textInstruct = gr.Textbox(label='指令文本', scale=1, placeholder='如：用粤语讲这句话', value='')
+						textCreate = gr.Textbox(label='合成文本', scale=3, value='我是通义实验室语音团队全新推出的生成式语音大模型，提供舒适自然的语音合成能力。')
+				with gr.Column(scale=1):
+					radioStream = gr.Radio(label='流式推理', choices=[('否', False), ('是', True)], value=False)
+					numberSpeed = gr.Number(label='语速调节（流式推理时无效）', minimum=0.5, maximum=2.0, step=0.1, value=1)
+					numberSeed = gr.Number(label='推理种子', value=0)
+					buttonSeedUpdate = gr.Button(value='随机')
+			buttonAudioCreate = gr.Button('生成音频', variant='primary')
+			audioCreated = gr.Audio(label='生成结果', autoplay=True, streaming=True)
 
-        generate_button = gr.Button("生成音频")
+		with gr.Tab('复刻音色'):
+			with gr.Row(equal_height=True):
+				with gr.Column(scale=3, min_width=0):
+					audioPromptUpload = gr.Audio(label='上传提示音频（推荐时长10~15秒，采样率应不低于16000hz）', sources='upload', type='filepath')
+				with gr.Column(scale=1, min_width=0):
+					audioPromptRecord = gr.Audio(label='录制提示音频', sources='microphone', type='filepath')
+			textPrompt = gr.Textbox(label='提示音频文本（与提示音频内容一致）', max_lines=1, value='')
+			textIDSpeakerInsert = gr.Textbox(label='创建音色ID', placeholder='不重复', max_lines=1, value='')
+			buttonSpeakerInsert = gr.Button('复刻音色', variant='primary')
 
-        audio_output = gr.Audio(label="合成音频", autoplay=True, streaming=True)
+		with gr.Tab('管理音色'):
+			boxCheckSpeakers = gr.CheckboxGroup(label='现有音色', choices=speakers)
+			buttonDeleteSpeakers = gr.Button('删除', variant='stop')
+			with gr.Row(equal_height=True):
+				with gr.Column(scale=4, min_width=0):
+					textIDSpeakerUpdate = gr.Textbox(label='改名音色ID', max_lines=1)
+				with gr.Column(scale=1, min_width=0):
+					buttonSpeakerUpdate = gr.Button('改名', variant='secondary')
 
-        seed_button.click(generate_seed, inputs=[], outputs=seed)
-        generate_button.click(generate_audio,
-                              inputs=[tts_text, mode_checkbox_group, sft_dropdown, prompt_text, prompt_wav_upload, prompt_wav_record, instruct_text,
-                                      seed, stream, speed],
-                              outputs=[audio_output])
-        mode_checkbox_group.change(fn=change_instruction, inputs=[mode_checkbox_group], outputs=[instruction_text])
-    demo.queue(max_size=4, default_concurrency_limit=2)
-    demo.launch(server_name='0.0.0.0', server_port=args.port)
+
+		buttonAudioCreate.click(createAudio,
+			inputs=[
+				radioModeInference,
+				textCreate, textInstruct, audioSourceCoverTimbre,
+				radioIDSpeaker,
+				textPrompt, audioPromptUpload, audioPromptRecord,
+				numberSpeed, radioStream, numberSeed,
+			],
+			outputs=[audioCreated],
+		)
+
+
+		buttonSpeakerInsert.click(insertSpeaker,
+			inputs=[textIDSpeakerInsert, textPrompt, audioPromptUpload, audioPromptRecord],
+			outputs=[radioIDSpeaker, boxCheckSpeakers, buttonSpeakerInsert])
+		buttonSpeakerUpdate.click(updateSpeaker, inputs=[boxCheckSpeakers, textIDSpeakerUpdate], outputs=[radioIDSpeaker, boxCheckSpeakers, textIDSpeakerUpdate])
+		buttonDeleteSpeakers.click(deleteSpeakers, inputs=[boxCheckSpeakers], outputs=[radioIDSpeaker, boxCheckSpeakers])
+
+
+		def updateTimbreCoverSourceAudioVisible(modeInference):
+			return [gr.update(visible=modeInference == '音色覆盖'), gr.update(visible=modeInference != '音色覆盖'), gr.update(visible=modeInference == '指令')]
+		radioModeInference.change(updateTimbreCoverSourceAudioVisible, inputs=[radioModeInference], outputs=[audioSourceCoverTimbre, textCreate, textInstruct])
+
+
+		def selectSpeakers():
+			global speakers, speakers_key
+			speakers = list(speakers_key.keys())
+			return [gr.update(choices=speakers, value=None), gr.update(choices=speakers, value=None)]
+		demo.load(selectSpeakers, outputs=[radioIDSpeaker, boxCheckSpeakers])
+
+
+		def updateSeed():
+			return gr.update(value=random.randint(1, 100000000))
+		buttonSeedUpdate.click(updateSeed, inputs=[], outputs=numberSeed)
+
+
+	demo.queue(max_size=4, default_concurrency_limit=2)
+	demo.launch(server_name='0.0.0.0', server_port=args.port)
+
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--port',
-                        type=int,
-                        default=8000)
-    parser.add_argument('--model_dir',
-                        type=str,
-                        default='pretrained_models/CosyVoice2-0.5B',
-                        help='local path or modelscope repo id')
-    args = parser.parse_args()
-    try:
-        cosyvoice = CosyVoice(args.model_dir)
-    except Exception:
-        try:
-            cosyvoice = CosyVoice2(args.model_dir)
-        except Exception:
-            raise TypeError('no valid model_type!')
+	parser = argparse.ArgumentParser()
+	parser.add_argument('--port', type=int, default=8000)
+	parser.add_argument('--dirModel', type=str, default='pretrained_models/CosyVoice2-0.5B', help='local path or modelscope repo id')
+	parser.add_argument('--fileSpeakers', type=str, default='speakers.pt')
+	args = parser.parse_args()
 
-    sft_spk = cosyvoice.list_available_spks()
-    if len(sft_spk) == 0:
-        sft_spk = ['']
-    prompt_sr = 16000
-    default_data = np.zeros(cosyvoice.sample_rate)
-    main()
+
+	try:
+		cosyvoice = CosyVoice2(args.dirModel)
+		datasEmpty = np.zeros(cosyvoice.sample_rate)
+	except Exception:
+		raise TypeError('没有找到模型')
+
+
+	if os.path.exists(args.fileSpeakers):
+		speakers_key = torch.load(args.fileSpeakers, map_location=cosyvoice.frontend.device)
+
+	speakers = list(speakers_key.keys())
+
+
+	main()
