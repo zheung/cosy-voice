@@ -13,7 +13,28 @@
 > <img src="./asset/webui-1.jpg" width="250px">
 > <img src="./asset/webui-2.jpg" width="250px">
 > <img src="./asset/webui-3.jpg" width="250px">
-
+> ### use with `uv`
+> ````bash
+> # Create and activate a virtual environment (with specified Python version)
+> uv venv --python 3.10
+> source .venv/bin/activate
+>
+> # Normal installation
+> uv pip install -r requirements.txt
+>
+> # If prompted "No solution found when resolving dependencies", try:
+> uv pip install -r requirements.txt --index-strategy unsafe-best-match
+>
+> # If prompted "Failed to build tensorrt-cu12", try:
+> uv pip install -r requirements.txt --no-build-isolation-package tensorrt-cu12
+>
+> # If both issues occur, use both parameters simultaneously:
+> uv pip install -r requirements.txt --index-strategy unsafe-best-match --no-build-isolation-package tensorrt-cu12
+>
+>
+> # After successful installation, run the webui
+> uv run webui.py
+> ````
 
 [![SVG Banners](https://svg-banners.vercel.app/api?type=origin&text1=CosyVoice🤠&text2=Text-to-Speech%20💖%20Large%20Language%20Model&width=800&height=210)](https://github.com/Akshay090/svg-banners)
 
